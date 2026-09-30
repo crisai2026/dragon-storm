@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dragon Storm</title>
+<style>
+  :root { box-sizing:border-box; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px); --bg:#0d1022; --fg:#e8e4ff; }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--fg); font-family:system-ui,sans-serif; }
+  body { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:8px; }
+  canvas { max-width:100%; background:#000; border:2px solid #3a2f7a; }
+  canvas:focus { outline:2px solid #ffe36a; }
+  .keys { font-size:13px; opacity:.85; max-width:800px; text-align:center; line-height:1.7; }
+  kbd { background:#262048; border:1px solid #4b3f8a; border-radius:3px; padding:0 5px; font-family:inherit; }
+  #touch { display:flex; justify-content:space-between; width:100%; max-width:800px; gap:8px; }
+  .pad { display:flex; flex-wrap:wrap; gap:6px; }
+  #touch button { min-width:52px; height:46px; font-size:14px; border-radius:8px; border:1px solid #4b3f8a; background:#262048; color:#fff; touch-action:none; user-select:none; }
+  #touch button:active { background:#4b3f8a; }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="450" tabindex="0"></canvas>
+<div id="touch">
+  <div class="pad"><button data-k="arrowleft">◀</button><button data-k="arrowup">▲</button><button data-k="arrowdown">▼</button><button data-k="arrowright">▶</button></div>
+  <div class="pad"><button data-k=" ">Jump</button><button data-k="x">Ki</button><button data-k="c">Beam</button><button data-k="z">Punch</button><button data-k="shift">Dash</button><button data-k="f">Fly</button><button data-k="t">Transform</button><button data-k="enter">OK</button></div>
+</div>
+<div class="keys">
+  <kbd>←</kbd><kbd>→</kbd> run · <kbd>Space</kbd> jump ×2 · <kbd>F</kbd> fly (infinite, <kbd>↑</kbd><kbd>↓</kbd>) · <kbd>X</kbd> ki blast · hold <kbd>C</kbd> beam ·
+  <kbd>Z</kbd> punch · <kbd>Shift</kbd> dash · <kbd>T</kbd> transform · <kbd>G</kbd> power down · <kbd>P</kbd> pause · <kbd>M</kbd> music · <kbd>Enter</kbd>/click continue
+</div>
+<script>
+// =====================================================================
+// CONFIG — every adjustable number lives here
+// =====================================================================
+const CONFIG = {
+  canvasWidth: 800, canvasHeight: 450, groundHeight: 60, arenaWidth: 800,
+  // Movement
+  gravity: 0.6, runSpeed: 5, jumpForce: 11, maxJumps: 2,           // Mechanics rule 1
+  heroWidth: 28, heroHeight: 44, flySpeed: 5,                        // flight is infinite (no ki cost)
+  dashDistance: 170, dashCooldown: 0.5, dashInvuln: 0.2,
+  // Health & lives
+  maxHealth: 100, startingLives: 3,                                  // Mechanics rule 5
+  contactDamage: 20, hurtInvulnSeconds: 1.0, knockback: 7,
+  // Instinct (auto-dodge + counter)
+  counterRange: 130, counterDamage: 3,
+  // Storms
+  stormHeal: 25,                                                     // Mechanics rule 3
+  stormEnergy: 40, stormKi: 30, stormCooldownSeconds: 3,
+  // Earthquakes
+  quakeEverySeconds: 8, quakeDurationSeconds: 3, quakeEnergyPerSec: 25, quakeKiPerSec: 15, quakeShake: 6,
+  // Other natural disasters
+  lightningEvery: 2.2, lightningWarn: 0.8, lightningDamage: 15, lightningEnergy: 15,
+  meteorEvery: 1.1, meteorDamage: 15, meteorEnergy: 8,
+  geyserCycle: 4, geyserWarn: 1, geyserErupt: 1.2, geyserHeight: 230, geyserDamage: 20,
+  tornadoSpeed: 1.5, tornadoPush: 4, tornadoLift: 3,
+  // Ki
+  maxKi: 100, kiRegenPerSec: 14, blastKiCost: 6, blastSpeed: 11, blastCooldown: 0.2, blastLifeSeconds: 1.2,
+  // Planet-buster beam (hold C)
+  beamKiCost: 40, beamMinCharge: 0.3, beamMaxCharge: 1.2, beamDuration: 0.6, beamDamage: 10, beamCooldown: 1.5,
+  // Martial arts
+  punchRange: 38, punchCooldown: 0.25,
+  // Scoring
+  blastScore: 50,                                                    // Mechanics rule 4 (the beam counts as a blast)
+  punchScore: 25, killEnergy: 10, bossScore: 1000, bossEnergy: 200,
+  // Regular enemies
+  gruntSpeed: 1.4, droneSpeed: 1.6, droneFireEvery: 2.5, shotSpeed: 5,
+  // Bosses (humanoid fighters + the titan)
+  bosses: {
+    zarkon:  { hp: 60,  speed: 3.2, damage: 20, fireEvery: 1.3, rushEvery: 3.5, teleportChance: 0.2 },
+    mutagen: { hp: 90,  speed: 3.6, damage: 22, fireEvery: 1.1, rushEvery: 3.0, teleportChance: 0.25, drainHeal: 6 },
+    magmora: { hp: 110, speed: 3.0, damage: 25, fireEvery: 1.2, rushEvery: 3.2, teleportChance: 0.15, regen: 2.5 },
+    gorrath: { hp: 220, damage: 30, breathEvery: 2.6, stompEvery: 4.5, rockEvery: 1.3 },
+    karvon:  { hp: 180, speed: 4.8, damage: 30, fireEvery: 0.8, rushEvery: 2.4, teleportChance: 0.45, blockChance: 0.4, burstEvery: 5 },
+  },
+  // Transformations: energy needed, speed ×, blast size, damage ×, blast pierces, auto-dodge chance, speed vs. light (story stat)
+  forms: [
+    { energy: 0,   speed: 1.0,  blastSize: 6,  damage: 1, pierce: false, dodge: 0.30, lightSpeed: 1.2e9 },
+    { energy: 120, speed: 1.12, blastSize: 8,  damage: 1.5, pierce: false, dodge: 0.40, lightSpeed: 3.5e10 },
+    { energy: 320, speed: 1.25, blastSize: 10, damage: 2, pierce: false, dodge: 0.52, lightSpeed: 4e11 },
+    { energy: 600, speed: 1.38, blastSize: 12, damage: 2.5, pierce: true,  dodge: 0.65, lightSpeed: 2.5e12 },
+    { energy: 950, speed: 1.5,  blastSize: 14, damage: 3.5, pierce: true,  dodge: 0.85, lightSpeed: 9e12 },
+  ],
+  // Music
+  musicVolume: 0.13,
+};
+
+// =====================================================================
+// STORY MODULE — characters, text, transformation names
+// =====================================================================
+const Story = {
+  hero: { name: "Hero" }, rival: { name: "Vorak" },
+  forms: [
+    { name: "Base",                  hair: "#1c1c1c", aura: null },
+    { name: "Storm Surge",           hair: "#38d6ff", aura: "#38d6ff" },
+    { name: "Thunder Fist",          hair: "#b36bff", aura: "#b36bff" },
+    { name: "Quake God",             hair: "#ff7a2e", aura: "#ff7a2e" },
+    { name: "Master Ultra Instinct", hair: "#e8eef7", aura: "#dfe8ff" },
+  ],
+  beamName: "Storm Cannon",
+  bosses: {
+    zarkon:  { name: "Zarkon the Tyrant",    lines: ["A storm child? I have conquered forty worlds. Yours makes forty-one."] },
+    mutagen: { name: "Mutagen",              lines: ["Every fighter I absorb makes me stronger. You will be my finest piece."] },
+    magmora: { name: "Magmora",              lines: ["Break me. Burn me. Scatter me. I always come back."] },
+    gorrath: { name: "Gorrath, the Titan",   lines: ["The ground howls. Gorrath rises, taller than the sky itself."] },
+    karvon:  { name: "Karvon, Void Warrior", lines: ["Strength is the only truth. Show me yours.", "HERO: Then let's find out who's stronger."] },
+  },
+  intro: [
+    "The universe is being erased. A silent force called the Void swallows planets one by one.",
+    "On Planet Raiko, where storms and earthquakes never rest, one Hero pulls ki from the sky and the ground itself.",
+    "He moves faster than thought. His body fights on instinct. Absorb the storms. Stop the erasure.",
+  ],
+  levelIntros: [
+    "Level 1 · Raiko Plains\nStorms heal you. Lightning strikes where the red marks appear. A tyrant waits at the end.",
+    "Level 2 · Quake Canyon\nEarthquakes charge your energy. Meteors are falling: blast them for energy.",
+    "Level 3 · The Truce\nYour rival Vorak wants to talk. No fighting here. Walk to the restaurant.",
+    "Level 4 · Ashfall Ridge\nVolcanic geysers and a roaming tornado. Something that regenerates waits in the ash.",
+    "Level 5 · Edge of Erasure\nGorrath, the titan, stands between you and the Void.",
+    "Level 6 · The Void Arena\nThe warrior who serves the Void. The strongest fighter you will ever face.",
+  ],
+  restaurantDialogue: [
+    { who: "Vorak", text: "Hero. Before we fight again... I'm starving." },
+    { who: "Hero",  text: "You chased me across a canyon to ask for lunch?" },
+    { who: "Vorak", text: "Even rivals need fries. Sit down." },
+    { who: "Vorak", text: "Listen. The Void isn't my doing. It woke Gorrath, the titan, and its master is a warrior called Karvon." },
+    { who: "Hero",  text: "Then our fight waits. First, them." },
+    { who: "Vorak", text: "Eat fast. The universe is shrinking." },
+  ],
+  win: "Karvon kneels. The Void collapses, and the stars return one by one. The universe remembers itself.",
+  gameOver: "The Hero is out of lives. The Void keeps spreading...",
+};
+
+// =====================================================================
+// WORLD MODULE — Planet Raiko: levels, platforms, disasters, drawing
+// =====================================================================
+const World = {
+  groundY: CONFIG.canvasHeight - CONFIG.groundHeight,
+  levels: [],
+  init() {
+    const g = this.groundY, P = (x, h, w = 140) => ({ x, y: g - h, w, h: 16 });
+    this.levels = [
+      { theme: "plains", width: 3000, boss: "zarkon", arena: 2200, lightning: true,
+        platforms: [P(350,90), P(600,170,120), P(1000,110,160), P(1400,190,120), P(1750,120,180), P(2450,150,120)],
+        storms: [{ x: 700, w: 220 }, { x: 1550, w: 200 }, { x: 2250, w: 140 }],
+        enemies: [["grunt",900],["grunt",1250],["grunt",1650],["grunt",1950],["drone",1150,230],["drone",1850,210]] },
+      { theme: "canyon", width: 3400, boss: "mutagen", arena: 2600, quakes: true, meteors: true,
+        platforms: [P(300,120), P(650,200,120), P(1000,140), P(1350,220,120), P(1800,110,200), P(2250,180), P(2800,150,140)],
+        storms: [{ x: 1550, w: 200 }, { x: 2650, w: 140 }],
+        enemies: [["grunt",700],["grunt",1100],["grunt",1450],["grunt",2000],["grunt",2400],["drone",900,220],["drone",1700,190],["drone",2300,200]] },
+      { theme: "town", width: 1600, goal: "restaurant", restaurantX: 1250, platforms: [], storms: [], enemies: [] },
+      { theme: "ash", width: 3200, boss: "magmora", arena: 2400, geysers: [600, 1150, 1700, 2100, 2750], tornado: [300, 2300],
+        platforms: [P(400,130), P(850,190,120), P(1300,120,160), P(1900,200,120), P(2600,160,120)],
+        storms: [{ x: 1450, w: 180 }, { x: 2450, w: 140 }],
+        enemies: [["grunt",800],["grunt",1400],["grunt",2000],["drone",1000,200],["drone",1600,180],["drone",2200,210]] },
+      { theme: "erasure", width: 800, boss: "gorrath", arena: 0, platforms: [P(80,150,110), P(240,240,110)], storms: [{ x: 10, w: 120 }], enemies: [] },
+      { theme: "void", width: 800, boss: "karvon", arena: 0, lightning: true, meteors: true,
+        platforms: [P(120,140,120), P(560,140,120), P(340,240,120)], storms: [{ x: 360, w: 90 }], enemies: [] },
+    ];
+    this.stars = Array.from({ length: 160 }, () => ({ x: Math.random() * 3600, y: Math.random() * g, r: Math.random() * 1.5 + 0.3 }));
+  },
+  skies: { plains: ["#1a1240","#4a2a6a"], canyon: ["#2a1020","#6a3a2a"], town: ["#162040","#3a4a7a"], ash: ["#1a0a08","#5a1a0a"], erasure: ["#050008","#2a0a1a"], void: ["#000","#140828"] },
+  grounds: { plains: ["#3b2a55","#7a5ab8"], canyon: ["#5a2e1e","#b0603a"], town: ["#2e3550","#6a7ab0"], ash: ["#2a1410","#ff5a1e"], erasure: ["#1a1030","#5a3a8a"], void: ["#0a0618","#8a6aff"] },
+  draw(ctx, lvl, camX, t) {
+    const W = CONFIG.canvasWidth, H = CONFIG.canvasHeight, g = this.groundY;
+    const [a, b] = this.skies[lvl.theme];
+    const sky = ctx.createLinearGradient(0, 0, 0, H); sky.addColorStop(0, a); sky.addColorStop(1, b);
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#fff";
+    for (const s of this.stars) { const sx = s.x - camX * 0.3; if (sx > -5 && sx < W + 5) { ctx.beginPath(); ctx.arc(sx, s.y, s.r, 0, 7); ctx.fill(); } }
+    if (["plains","canyon","town"].includes(lvl.theme)) { ctx.fillStyle = "#6b4fb0"; ctx.beginPath(); ctx.arc(620 - camX * 0.1, 90, 40, 0, 7); ctx.fill(); }
+    if (lvl.theme === "canyon") { ctx.fillStyle = "#4a2418"; for (let i = 0; i < 12; i++) { const x = i * 380 - camX * 0.5; ctx.beginPath(); ctx.moveTo(x, g); ctx.lineTo(x + 90, g - 180); ctx.lineTo(x + 200, g - 140); ctx.lineTo(x + 300, g); ctx.fill(); } }
+    if (lvl.theme === "ash") { // volcanoes + falling ash
+      for (let i = 0; i < 8; i++) { const x = i * 520 - camX * 0.4; ctx.fillStyle = "#2a100a"; ctx.beginPath(); ctx.moveTo(x, g); ctx.lineTo(x + 170, g - 220); ctx.lineTo(x + 230, g - 220); ctx.lineTo(x + 400, g); ctx.fill(); ctx.fillStyle = "#ff5a1e"; ctx.fillRect(x + 175, g - 224, 50, 6); }
+      ctx.fillStyle = "rgba(200,180,170,.5)"; for (let i = 0; i < 60; i++) ctx.fillRect((i * 83 + t * 15) % W, (i * 47 + t * 40) % g, 2, 2);
+    }
+    if (lvl.theme === "erasure" || lvl.theme === "void") { // the erasure eating the sky
+      for (let i = 0; i < 60; i++) { const sx = (i * 131 + t * 25) % W, sy = (i * 97) % (g - 40); ctx.fillStyle = `rgba(0,0,0,${0.5 + 0.5 * Math.sin(t + i)})`; ctx.fillRect(sx, sy, 22, 22); }
+      if (lvl.theme === "void") { ctx.strokeStyle = "rgba(138,106,255,.25)"; ctx.lineWidth = 2; for (let r = 60; r < 500; r += 70) { ctx.beginPath(); ctx.arc(400, 200, r + (t * 30) % 70, 0, 7); ctx.stroke(); } }
+    }
+    const gc = this.grounds[lvl.theme];
+    ctx.fillStyle = gc[0]; ctx.fillRect(0, g, W, CONFIG.groundHeight); ctx.fillStyle = gc[1]; ctx.fillRect(0, g, W, 4);
+    for (const p of lvl.platforms) { ctx.fillStyle = gc[0]; ctx.fillRect(p.x - camX, p.y, p.w, p.h); ctx.fillStyle = gc[1]; ctx.fillRect(p.x - camX, p.y, p.w, 3); }
+    for (const s of lvl.storms) {
+      const x = s.x - camX; if (x > W || x + s.w < 0) continue;
+      ctx.fillStyle = "rgba(60,70,110,0.35)"; ctx.fillRect(x, 0, s.w, g);
+      ctx.fillStyle = "#2a2f4a"; for (let i = 0; i < s.w; i += 30) { ctx.beginPath(); ctx.arc(x + i + 15, 30, 28, 0, 7); ctx.fill(); }
+      ctx.strokeStyle = "rgba(160,190,255,0.6)"; ctx.lineWidth = 1;
+      for (let i = 0; i < 30; i++) { const rx = x + ((i * 37 + t * 60) % s.w), ry = (i * 71 + t * 400) % g; ctx.beginPath(); ctx.moveTo(rx, ry); ctx.lineTo(rx - 3, ry + 12); ctx.stroke(); }
+    }
+    if (lvl.boss && lvl.arena > 0) { const ax = lvl.arena - camX; ctx.fillStyle = "rgba(255,60,60,.25)"; ctx.fillRect(ax, 0, 4, g); }
+    if (lvl.goal === "restaurant") this.drawRestaurant(ctx, lvl.restaurantX - camX, g);
+  },
+  drawRestaurant(ctx, x, g) {
+    ctx.fillStyle = "#1f7a78"; ctx.fillRect(x, g - 150, 260, 150);
+    ctx.fillStyle = "#f08a24"; ctx.fillRect(x - 10, g - 170, 280, 26);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 18px system-ui"; ctx.fillText("BURGERS", x + 88, g - 151);
+    ctx.fillStyle = "#bfeef0"; ctx.fillRect(x + 20, g - 120, 70, 50); ctx.fillRect(x + 170, g - 120, 70, 50);
+    ctx.fillStyle = "#402818"; ctx.fillRect(x + 110, g - 90, 40, 90);
+  },
+};
+
+// =====================================================================
+// MECHANICS MODULE — input, physics, ki, combat, disasters, bosses
+// =====================================================================
+const Mechanics = {
+  keys: {}, pressed: {},
+  init() {
+    addEventListener("keydown", e => {
+      const k = e.key.toLowerCase();
+      if ([" ","arrowup","arrowdown","arrowleft","arrowright"].includes(k)) e.preventDefault();
+      if (!this.keys[k]) this.pressed[k] = true;
+      this.keys[k] = true;
+    });
+    addEventListener("keyup", e => { this.keys[e.key.toLowerCase()] = false; });
+    this.resetRun();
+  },
+  resetRun() { this.score = 0; this.lives = CONFIG.startingLives; this.energy = 0; this.form = 0; },
+  startLevel(lvl) {
+    this.lvl = lvl;
+    this.hero = { x: lvl.arena === 0 && lvl.boss ? 60 : 60, y: World.groundY - CONFIG.heroHeight, vx: 0, vy: 0, w: CONFIG.heroWidth, h: CONFIG.heroHeight,
+                  jumpsUsed: 0, onGround: true, facing: 1, flying: false, health: CONFIG.maxHealth, ki: CONFIG.maxKi,
+                  invuln: 0, knockT: 0, blastT: 0, punchT: 0, punchAnim: 0, dashT: 0, charge: 0, beamT: 0 };
+    this.blasts = []; this.shots = []; this.particles = []; this.popups = []; this.trail = []; this.meteors = []; this.waves = [];
+    this.beam = null; this.flash = 0; this.shake = 0;
+    this.stormState = lvl.storms.map(() => ({ inside: false, cooldown: 0 }));
+    this.quakeT = 0; this.quakeActive = false;
+    this.lightning = { t: CONFIG.lightningEvery, strike: null };
+    this.meteorT = CONFIG.meteorEvery; this.geyserT = 0;
+    this.tornado = lvl.tornado ? { x: lvl.tornado[0], dir: 1 } : null;
+    this.enemies = lvl.enemies.map(([type, x, y]) => type === "grunt"
+      ? { type, x, y: World.groundY - 36, w: 30, h: 36, vx: -CONFIG.gruntSpeed, minX: x - 120, maxX: x + 120, alive: true }
+      : { type, x, y, baseY: y, w: 32, h: 22, vx: -CONFIG.droneSpeed, minX: x - 150, maxX: x + 150, t: Math.random() * 6, fireT: Math.random() * 2 + 1, alive: true });
+    this.boss = null; this.arenaLocked = false;
+  },
+  spawnBoss() {
+    const id = this.lvl.boss, S = CONFIG.bosses[id], A = this.lvl.arena;
+    this.arenaLocked = true;
+    if (id === "gorrath") this.boss = { id, kind: "kaiju", S, x: A + 390, y: World.groundY - 410, baseY: World.groundY - 410, w: 430, h: 410, hp: S.hp, t: 0, breathT: 2, stompT: 3.5, rockT: 1, hitFlash: 0, alive: true, isBoss: true };
+    else this.boss = { id, kind: "fighter", S, x: A + 620, y: World.groundY - 120, w: 36, h: 56, hp: S.hp, t: 0, fireT: 1.5, rushT: S.rushEvery, burstT: S.burstEvery || 0, rushing: 0, vx: 0, vy: 0, facing: -1, hitFlash: 0, alive: true, isBoss: true };
+  },
+  get F() { return CONFIG.forms[this.form]; },
+  unlockedForm() { let f = 0; CONFIG.forms.forEach((d, i) => { if (this.energy >= d.energy) f = i; }); return f; },
+  popup(text, x, y, color = "#fff") { this.popups.push({ text, x, y, t: 1, color }); },
+  burst(x, y, color, n = 14) { for (let i = 0; i < n; i++) this.particles.push({ x, y, vx: (Math.random() - .5) * 9, vy: (Math.random() - .5) * 9, t: .6, color }); },
+  overlap(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; },
+  circleBox(c) { return { x: c.x - c.r, y: c.y - c.r, w: c.r * 2, h: c.r * 2 }; },
+  hitHero(dmg, attacker = null) {
+    const h = this.hero; if (h.invuln > 0) return;
+    if (Math.random() < this.F.dodge) { // Instinct: body moves on its own
+      h.invuln = 0.4; this.addTrail(true); this.popup("INSTINCT DODGE", h.x - 30, h.y - 12, "#dfe8ff");
+      if (attacker && Math.abs((attacker.x + attacker.w / 2) - (h.x + h.w / 2)) < CONFIG.counterRange + attacker.w / 2) {
+        this.popup("COUNTER!", h.x - 10, h.y - 28, "#ffe36a");
+        if (attacker.isBoss) this.damageBoss(CONFIG.counterDamage * this.F.damage, CONFIG.punchScore, false); else this.killEnemy(attacker, CONFIG.punchScore);
+      }
+      return;
+    }
+    h.health -= dmg; h.invuln = CONFIG.hurtInvulnSeconds; h.knockT = 0.2; h.vx = -h.facing * CONFIG.knockback; if (!h.flying) h.vy = -5;
+    if (h.health <= 0) this.onDeath();
+  },
+  onDeath: () => {}, onLevelGoal: () => {}, onBossStart: () => {},
+  addTrail(big) { const h = this.hero; this.trail.push({ x: h.x, y: h.y, t: big ? 0.5 : 0.25 }); },
+
+  update(dt) {
+    const h = this.hero, k = this.keys, p = this.pressed, lvl = this.lvl, f = dt * 60, F = this.F;
+    const speed = CONFIG.runSpeed * F.speed;
+    const minX = this.arenaLocked ? lvl.arena : 0, maxX = (this.arenaLocked ? lvl.arena + CONFIG.arenaWidth : lvl.width) - h.w;
+    // transformations
+    if (p["t"]) { if (this.form < this.unlockedForm()) { this.form++; const L = Story.forms[this.form]; this.burst(h.x + 14, h.y + 22, L.aura, 40); this.flash = 0.3; this.popup(L.name.toUpperCase() + "!", h.x - 50, h.y - 20, L.aura); } else this.popup("Need more energy", h.x - 30, h.y - 20, "#aaa"); }
+    if (p["g"] && this.form > 0) { this.form = 0; this.popup("Powered down", h.x - 20, h.y - 20, "#aaa"); }
+    if (p["f"]) { h.flying = !h.flying; h.vy = 0; h.jumpsUsed = 0; }
+    // run + dash
+    let move = 0;
+    if (k["arrowleft"] || k["a"]) { move = -speed; h.facing = -1; }
+    if (k["arrowright"] || k["d"]) { move = speed; h.facing = 1; }
+    h.dashT -= dt;
+    if (p["shift"] && h.dashT <= 0) { for (let i = 0; i < 5; i++) { this.trail.push({ x: h.x + h.facing * i * CONFIG.dashDistance / 5, y: h.y, t: 0.35 }); } h.x += h.facing * CONFIG.dashDistance; h.dashT = CONFIG.dashCooldown; h.invuln = Math.max(h.invuln, CONFIG.dashInvuln); }
+    h.knockT -= dt;
+    h.x += (h.knockT > 0 ? h.vx : move) * f;
+    h.x = Math.max(minX, Math.min(maxX, h.x));
+    if (move && Math.random() < 0.3) this.addTrail(false);
+    // vertical
+    const prevBottom = h.y + h.h;
+    if (h.flying) {
+      h.vy = 0;
+      if (k["arrowup"] || k["w"] || k[" "]) h.vy = -CONFIG.flySpeed * F.speed;
+      if (k["arrowdown"] || k["s"]) h.vy = CONFIG.flySpeed * F.speed;
+      h.y += h.vy * f; h.y = Math.max(10, h.y);
+    } else {
+      if ((p[" "] || p["w"] || p["arrowup"]) && h.jumpsUsed < CONFIG.maxJumps) { h.vy = -CONFIG.jumpForce; h.jumpsUsed++; }
+      h.vy += CONFIG.gravity * f; h.y += h.vy * f;
+    }
+    h.ki = Math.min(CONFIG.maxKi, h.ki + CONFIG.kiRegenPerSec * dt);
+    h.onGround = false;
+    if (h.y + h.h >= World.groundY) { h.y = World.groundY - h.h; h.vy = 0; h.onGround = true; }
+    if (!h.flying) for (const pl of lvl.platforms)
+      if (h.vy >= 0 && prevBottom <= pl.y + 1 && h.y + h.h >= pl.y && h.x + h.w > pl.x && h.x < pl.x + pl.w) { h.y = pl.y - h.h; h.vy = 0; h.onGround = true; }
+    if (h.onGround && !h.flying) h.jumpsUsed = 0;
+    h.invuln = Math.max(0, h.invuln - dt);
+
+    // storms (rule 3)
+    lvl.storms.forEach((s, i) => {
+      const st = this.stormState[i]; st.cooldown = Math.max(0, st.cooldown - dt);
+      const inside = h.x + h.w > s.x && h.x < s.x + s.w;
+      if (inside && !st.inside && st.cooldown === 0) {
+        h.health = Math.min(CONFIG.maxHealth, h.health + CONFIG.stormHeal); h.ki = Math.min(CONFIG.maxKi, h.ki + CONFIG.stormKi);
+        this.energy += CONFIG.stormEnergy; st.cooldown = CONFIG.stormCooldownSeconds;
+        this.popup(`+${CONFIG.stormHeal} HP  +${CONFIG.stormEnergy} energy`, h.x - 40, h.y - 20, "#9fd0ff"); this.burst(h.x + 14, h.y + 22, "#9fd0ff", 20);
+      }
+      st.inside = inside;
+    });
+    this.updateDisasters(dt, f);
+
+    // ki blast
+    h.blastT -= dt; h.punchT -= dt; h.punchAnim -= dt; h.beamT -= dt;
+    const color = Story.forms[this.form].aura || "#ffe36a";
+    if ((k["x"] || k["k"]) && h.blastT <= 0 && h.ki >= CONFIG.blastKiCost) {
+      h.ki -= CONFIG.blastKiCost; h.blastT = CONFIG.blastCooldown;
+      this.blasts.push({ x: h.x + (h.facing > 0 ? h.w : 0), y: h.y + 20, vx: CONFIG.blastSpeed * h.facing, r: F.blastSize, life: CONFIG.blastLifeSeconds, pierce: F.pierce, dmg: F.damage, color, hit: new Set() });
+    }
+    // beam: hold C to charge, release to fire
+    if (k["c"] && h.beamT <= 0 && h.ki >= CONFIG.beamKiCost) h.charge = Math.min(CONFIG.beamMaxCharge, h.charge + dt);
+    else if (h.charge > 0) {
+      if (h.charge >= CONFIG.beamMinCharge && h.ki >= CONFIG.beamKiCost) this.fireBeam(h.charge / CONFIG.beamMaxCharge, color);
+      h.charge = 0;
+    }
+    if (this.beam) { this.beam.t -= dt; this.beam.x = h.facing > 0 ? h.x + h.w : h.x; this.beam.y = h.y + 20; if (this.beam.t <= 0) this.beam = null; }
+    // punch
+    if ((p["z"] || p["j"]) && h.punchT <= 0) {
+      h.punchT = CONFIG.punchCooldown; h.punchAnim = 0.12;
+      const box = { x: h.facing > 0 ? h.x + h.w : h.x - CONFIG.punchRange, y: h.y + 4, w: CONFIG.punchRange, h: 34 };
+      for (const e of this.enemies) if (e.alive && this.overlap(box, e)) this.killEnemy(e, CONFIG.punchScore);
+      if (this.boss && this.boss.alive && this.overlap(box, this.boss)) this.damageBoss(F.damage * 1.5, CONFIG.punchScore, false);
+    }
+    for (const b of this.blasts) {
+      b.x += b.vx * f; b.life -= dt;
+      const box = this.circleBox(b);
+      for (const e of this.enemies) if (e.alive && !b.hit.has(e) && this.overlap(box, e)) { this.killEnemy(e, CONFIG.blastScore); b.hit.add(e); if (!b.pierce) b.life = 0; } // rules 2 & 4
+      for (const m of this.meteors) if (!m.dead && this.overlap(box, this.circleBox(m))) { m.dead = true; this.energy += CONFIG.meteorEnergy; this.burst(m.x, m.y, "#ffb04a"); if (!b.pierce) b.life = 0; }
+      if (this.boss && this.boss.alive && b.life > 0 && this.overlap(box, this.boss)) { this.damageBoss(b.dmg, CONFIG.blastScore, true); b.life = 0; }
+    }
+    this.blasts = this.blasts.filter(b => b.life > 0 && b.x > -50 && b.x < lvl.width + 50);
+
+    // regular enemies
+    for (const e of this.enemies) {
+      if (!e.alive) continue;
+      e.x += e.vx * f; if (e.x < e.minX || e.x > e.maxX) e.vx *= -1;
+      if (e.type === "drone") {
+        e.t += dt; e.y = e.baseY + Math.sin(e.t * 2) * 30; e.fireT -= dt;
+        if (e.fireT <= 0 && Math.abs(e.x - h.x) < 500) { e.fireT = CONFIG.droneFireEvery; this.aimShot(e.x + 16, e.y + 11, CONFIG.shotSpeed * 0.8, 6, 12, "#ff5a5a"); }
+      }
+      if (this.overlap(h, e)) this.hitHero(CONFIG.contactDamage, e);
+    }
+    // boss
+    if (lvl.boss && !this.boss && h.x > lvl.arena + (lvl.arena ? 60 : -1)) { this.spawnBoss(); this.onBossStart(); }
+    const B = this.boss;
+    if (B && B.alive) { B.hitFlash -= dt; B.t += dt; if (B.kind === "kaiju") this.updateKaiju(B, dt, f); else this.updateFighter(B, dt, f); }
+    // projectiles
+    for (const s of this.shots) { s.x += s.vx * f; s.y += s.vy * f; if (this.overlap(h, this.circleBox(s))) { const before = h.health; this.hitHero(s.dmg); if (h.health < before && s.drain && B) B.hp = Math.min(B.S.hp, B.hp + s.drain); s.dead = true; } }
+    this.shots = this.shots.filter(s => !s.dead && s.x > -60 && s.x < lvl.width + 60 && s.y > -80 && s.y < World.groundY + 10);
+    for (const w of this.waves) { w.x += w.vx * f; if (this.overlap(h, w)) { this.hitHero(w.dmg); } }
+    this.waves = this.waves.filter(w => w.x > lvl.arena - 40);
+
+    for (const q of this.particles) { q.x += q.vx * f; q.y += q.vy * f; q.t -= dt; }
+    this.particles = this.particles.filter(q => q.t > 0);
+    for (const q of this.popups) { q.y -= 0.6 * f; q.t -= dt; }
+    this.popups = this.popups.filter(q => q.t > 0);
+    for (const q of this.trail) q.t -= dt; this.trail = this.trail.filter(q => q.t > 0);
+    this.flash = Math.max(0, this.flash - dt); this.shake = Math.max(0, this.shake - dt);
+
+    if (lvl.goal === "restaurant" && h.x > lvl.restaurantX + 100) this.onLevelGoal();
+    if (B && !B.alive) this.onLevelGoal();
+    this.pressed = {};
+  },
+  aimShot(x, y, speed, r, dmg, color, spread = 0, drain = 0) {
+    const h = this.hero, a = Math.atan2(h.y + 20 - y, h.x + 14 - x) + spread;
+    this.shots.push({ x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, r, dmg, color, drain });
+  },
+  fireBeam(power, color) {
+    const h = this.hero, F = this.F;
+    h.ki -= CONFIG.beamKiCost; h.beamT = CONFIG.beamCooldown;
+    const thick = 20 + power * 40;
+    this.beam = { t: CONFIG.beamDuration, dir: h.facing, thick, color, x: 0, y: 0 };
+    this.flash = 0.35; this.shake = 0.4;
+    this.popup(Story.beamName.toUpperCase() + "!", h.x - 40, h.y - 30, color);
+    const box = h.facing > 0 ? { x: h.x + h.w, y: h.y + 20 - thick / 2, w: 2000, h: thick } : { x: h.x - 2000, y: h.y + 20 - thick / 2, w: 2000, h: thick };
+    for (const e of this.enemies) if (e.alive && this.overlap(box, e)) this.killEnemy(e, CONFIG.blastScore);
+    for (const m of this.meteors) if (this.overlap(box, this.circleBox(m))) { m.dead = true; this.energy += CONFIG.meteorEnergy; }
+    this.shots = this.shots.filter(s => !this.overlap(box, this.circleBox(s)));
+    if (this.boss && this.boss.alive && this.overlap(box, this.boss)) this.damageBoss(CONFIG.beamDamage * (0.5 + power) * F.damage, CONFIG.blastScore, false);
+  },
+  updateFighter(B, dt, f) {
+    const h = this.hero, S = B.S, phase2 = B.hp < S.hp / 2, spd = S.speed * (phase2 ? 1.3 : 1), A = this.lvl.arena;
+    B.fireT -= dt; B.rushT -= dt; B.burstT -= dt;
+    if (S.regen) B.hp = Math.min(S.hp, B.hp + S.regen * dt);
+    if (B.rushing > 0) { B.rushing -= dt; B.x += B.vx * f; B.y += B.vy * f; }
+    else {
+      const side = B.x > h.x ? 1 : -1, tx = h.x + side * 220, ty = h.y - 30 + Math.sin(B.t * 2) * 60;
+      B.x += Math.sign(tx - B.x) * Math.min(spd * f, Math.abs(tx - B.x));
+      B.y += Math.sign(ty - B.y) * Math.min(spd * f, Math.abs(ty - B.y));
+      if (B.rushT <= 0) { B.rushT = S.rushEvery; B.rushing = 0.45; const dx = h.x - B.x, dy = h.y - B.y, d = Math.hypot(dx, dy) || 1; B.vx = dx / d * spd * 3.5; B.vy = dy / d * spd * 3.5; }
+      if (B.fireT <= 0) {
+        B.fireT = S.fireEvery * (phase2 ? 0.7 : 1);
+        const col = { zarkon: "#ff3a8a", mutagen: "#6affd0", magmora: "#ff7a1e", karvon: "#ff3030" }[B.id];
+        const n = phase2 ? 3 : 1; for (let i = 0; i < n; i++) this.aimShot(B.x + 18, B.y + 20, CONFIG.shotSpeed * 1.2, 8, 15, col, (i - (n - 1) / 2) * 0.22, S.drainHeal || 0);
+      }
+      if (S.burstEvery && B.burstT <= 0) { B.burstT = S.burstEvery; for (let i = 0; i < 14; i++) { const a = i / 14 * Math.PI * 2; this.shots.push({ x: B.x + 18, y: B.y + 28, vx: Math.cos(a) * 4, vy: Math.sin(a) * 4, r: 9, dmg: 18, color: "#ff3030" }); } this.shake = 0.3; }
+    }
+    B.x = Math.max(A, Math.min(A + CONFIG.arenaWidth - B.w, B.x)); B.y = Math.max(20, Math.min(World.groundY - B.h, B.y));
+    B.facing = h.x < B.x ? -1 : 1;
+    if (this.overlap(h, B)) this.hitHero(S.damage, B);
+  },
+  updateKaiju(B, dt, f) {
+    const h = this.hero, S = B.S, phase2 = B.hp < S.hp / 2, A = this.lvl.arena, rate = phase2 ? 0.65 : 1;
+    B.y = B.baseY + Math.sin(B.t * 1.5) * 6;
+    B.breathT -= dt; B.stompT -= dt; B.rockT -= dt;
+    if (B.breathT <= 0) { B.breathT = S.breathEvery * rate; for (let i = -2; i <= 2; i++) this.aimShot(B.x + 30, B.y + 95, 6, 14, 22, "#5ad0ff", i * 0.14); }
+    if (B.stompT <= 0) { B.stompT = S.stompEvery * rate; this.shake = 0.6; this.waves.push({ x: B.x - 30, y: World.groundY - 34, w: 34, h: 34, vx: -7, dmg: 25 }); if (phase2) this.waves.push({ x: B.x + 20, y: World.groundY - 34, w: 34, h: 34, vx: -5, dmg: 25 }); }
+    if (B.rockT <= 0) { B.rockT = S.rockEvery * rate; this.shots.push({ x: A + 20 + Math.random() * (B.x - A - 20), y: -20, vx: 0, vy: 5.5, r: 16, dmg: 20, color: "#7a5a4a" }); }
+    if (this.overlap(h, B)) { this.hitHero(S.damage, B); h.x = Math.min(h.x, B.x - h.w); }
+  },
+  killEnemy(e, pts) { if (!e.alive) return; e.alive = false; this.score += pts; this.energy += CONFIG.killEnergy; this.burst(e.x + e.w / 2, e.y + e.h / 2, "#ffb04a"); this.popup("+" + pts, e.x, e.y - 10, "#ffe36a"); },
+  damageBoss(dmg, pts, blockable) {
+    const B = this.boss; if (!B.alive) return;
+    if (blockable && B.S.blockChance && Math.random() < B.S.blockChance) { this.popup("BLOCKED", B.x - 10, B.y - 10, "#ff9a9a"); return; }
+    B.hp -= dmg; B.hitFlash = 0.1; this.score += pts; this.popup("+" + pts, B.x + B.w / 2, B.y, "#ffe36a");
+    if (B.kind === "fighter" && B.S.teleportChance && Math.random() < B.S.teleportChance) { this.trail.push({ x: B.x, y: B.y, t: 0.3, enemy: true }); B.x = this.lvl.arena + 60 + Math.random() * 680; B.y = 60 + Math.random() * 200; }
+    if (B.hp <= 0) { B.alive = false; this.score += CONFIG.bossScore; this.energy += CONFIG.bossEnergy; this.burst(B.x + B.w / 2, B.y + B.h / 2, "#ffe36a", 100); this.flash = 0.5; }
+  },
+  updateDisasters(dt, f) {
+    const h = this.hero, lvl = this.lvl;
+    this.quakeActive = false;
+    if (lvl.quakes) {
+      this.quakeT += dt;
+      this.quakeActive = this.quakeT % (CONFIG.quakeEverySeconds + CONFIG.quakeDurationSeconds) > CONFIG.quakeEverySeconds;
+      if (this.quakeActive && h.onGround) { this.energy += CONFIG.quakeEnergyPerSec * dt; h.ki = Math.min(CONFIG.maxKi, h.ki + CONFIG.quakeKiPerSec * dt); }
+    }
+    if (lvl.lightning) {
+      const L = this.lightning; L.t -= dt;
+      if (!L.strike && L.t <= 0) L.strike = { x: h.x + 14 + (Math.random() - 0.5) * 300, t: CONFIG.lightningWarn, fired: false };
+      if (L.strike) {
+        L.strike.t -= dt;
+        if (L.strike.t <= 0 && !L.strike.fired) {
+          L.strike.fired = true; this.flash = 0.12;
+          if (Math.abs(h.x + 14 - L.strike.x) < 26) {
+            if (h.invuln <= 0 && Math.random() < this.F.dodge) { this.energy += CONFIG.lightningEnergy; this.popup(`Absorbed lightning +${CONFIG.lightningEnergy}`, h.x - 50, h.y - 14, "#fffbd0"); h.invuln = 0.4; }
+            else this.hitHero(CONFIG.lightningDamage);
+          }
+        }
+        if (L.strike.t < -0.2) { L.strike = null; L.t = CONFIG.lightningEvery; }
+      }
+    }
+    if (lvl.meteors) {
+      this.meteorT -= dt;
+      const cam = this.arenaLocked ? lvl.arena : Math.max(0, h.x - 400);
+      if (this.meteorT <= 0) { this.meteorT = CONFIG.meteorEvery; this.meteors.push({ x: cam + 100 + Math.random() * 900, y: -20, vx: -2.2, vy: 5, r: 13 }); }
+      for (const m of this.meteors) {
+        m.x += m.vx * f; m.y += m.vy * f;
+        if (this.overlap(h, this.circleBox(m))) { this.hitHero(CONFIG.meteorDamage); m.dead = true; }
+        if (m.y > World.groundY) { m.dead = true; this.burst(m.x, World.groundY, "#ff7a2e", 8); }
+      }
+      this.meteors = this.meteors.filter(m => !m.dead);
+    }
+    if (lvl.geysers) {
+      this.geyserT = (this.geyserT + dt) % CONFIG.geyserCycle;
+      const erupting = this.geyserT > CONFIG.geyserCycle - CONFIG.geyserErupt;
+      if (erupting) for (const gx of lvl.geysers) if (this.overlap(h, { x: gx - 20, y: World.groundY - CONFIG.geyserHeight, w: 40, h: CONFIG.geyserHeight })) { this.hitHero(CONFIG.geyserDamage); }
+    }
+    if (this.tornado) {
+      const T = this.tornado; T.x += T.dir * CONFIG.tornadoSpeed * f;
+      if (T.x < lvl.tornado[0] || T.x > lvl.tornado[1]) T.dir *= -1;
+      if (Math.abs(h.x + 14 - T.x) < 45) { h.x += T.dir * CONFIG.tornadoPush * f; h.y -= CONFIG.tornadoLift * f; h.vy = Math.min(h.vy, 0); }
+    }
+  },
+
+  // ---------- drawing ----------
+  draw(ctx, camX, t) {
+    const lvl = this.lvl, g = World.groundY;
+    if (lvl.geysers) {
+      const warn = this.geyserT > CONFIG.geyserCycle - CONFIG.geyserErupt - CONFIG.geyserWarn, erupt = this.geyserT > CONFIG.geyserCycle - CONFIG.geyserErupt;
+      for (const gx of lvl.geysers) {
+        const x = gx - camX; ctx.fillStyle = "#1a0a06"; ctx.fillRect(x - 24, g - 6, 48, 6);
+        if (erupt) { ctx.fillStyle = "#ff5a1e"; ctx.fillRect(x - 20, g - CONFIG.geyserHeight, 40, CONFIG.geyserHeight); ctx.fillStyle = "#ffd04a"; ctx.fillRect(x - 8, g - CONFIG.geyserHeight, 16, CONFIG.geyserHeight); }
+        else if (warn) { ctx.fillStyle = `rgba(255,90,30,${0.4 + 0.4 * Math.sin(t * 30)})`; ctx.fillRect(x - 20, g - 14, 40, 14); }
+      }
+    }
+    if (this.tornado) {
+      const x = this.tornado.x - camX;
+      for (let i = 0; i < 14; i++) { const y = g - i * 22, w = 14 + i * 5, off = Math.sin(t * 8 + i) * 8; ctx.fillStyle = `rgba(180,170,160,${0.25 + 0.03 * i})`; ctx.beginPath(); ctx.ellipse(x + off, y, w, 8, 0, 0, 7); ctx.fill(); }
+    }
+    if (this.lightning && this.lightning.strike) {
+      const S = this.lightning.strike, x = S.x - camX;
+      if (!S.fired) { ctx.fillStyle = `rgba(255,60,60,${0.5 + 0.4 * Math.sin(t * 40)})`; ctx.fillRect(x - 26, g - 6, 52, 6); }
+      else { ctx.strokeStyle = "#fffbd0"; ctx.lineWidth = 5; ctx.beginPath(); let lx = x; ctx.moveTo(lx, 0); for (let y = 0; y < g; y += 35) { lx = x + (Math.random() - 0.5) * 30; ctx.lineTo(lx, y); } ctx.lineTo(x, g); ctx.stroke(); }
+    }
+    for (const m of this.meteors) { const x = m.x - camX; ctx.fillStyle = "rgba(255,140,40,.4)"; ctx.beginPath(); ctx.moveTo(x, m.y); ctx.lineTo(x + 30, m.y - 60); ctx.lineTo(x + 12, m.y - 10); ctx.fill(); ctx.fillStyle = "#6a4a3a"; ctx.beginPath(); ctx.arc(x, m.y, m.r, 0, 7); ctx.fill(); ctx.fillStyle = "#ff7a2e"; ctx.beginPath(); ctx.arc(x - 3, m.y + 3, m.r * .5, 0, 7); ctx.fill(); }
+    for (const e of this.enemies) if (e.alive) this.drawEnemy(ctx, e, e.x - camX, t);
+    const B = this.boss;
+    if (B && B.alive) { if (B.kind === "kaiju") this.drawKaiju(ctx, B, B.x - camX, t); else this.drawFighter(ctx, B, B.x - camX, t); }
+    for (const w of this.waves) { const x = w.x - camX; ctx.fillStyle = "rgba(90,208,255,.7)"; ctx.beginPath(); ctx.moveTo(x, w.y + w.h); ctx.lineTo(x + w.w / 2, w.y); ctx.lineTo(x + w.w, w.y + w.h); ctx.fill(); }
+    for (const s of this.shots) { ctx.fillStyle = s.color; ctx.globalAlpha = .4; ctx.beginPath(); ctx.arc(s.x - camX, s.y, s.r * 1.6, 0, 7); ctx.fill(); ctx.globalAlpha = 1; ctx.beginPath(); ctx.arc(s.x - camX, s.y, s.r, 0, 7); ctx.fill(); }
+    for (const b of this.blasts) { ctx.fillStyle = b.color; ctx.globalAlpha = .4; ctx.beginPath(); ctx.arc(b.x - camX, b.y, b.r * 1.8, 0, 7); ctx.fill(); ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(b.x - camX, b.y, b.r, 0, 7); ctx.fill(); }
+    for (const q of this.trail) { ctx.globalAlpha = q.t * 1.2; ctx.fillStyle = q.enemy ? "#ff6060" : (Story.forms[this.form].aura || "#8ab0ff"); ctx.fillRect(q.x - camX + 4, q.y, 20, 44); ctx.globalAlpha = 1; }
+    this.drawHero(ctx, camX, t);
+    if (this.beam) this.drawBeam(ctx, camX, t);
+    for (const q of this.particles) { ctx.fillStyle = q.color; ctx.globalAlpha = q.t / .6; ctx.fillRect(q.x - camX, q.y, 4, 4); ctx.globalAlpha = 1; }
+    ctx.font = "bold 13px system-ui";
+    for (const q of this.popups) { ctx.globalAlpha = Math.min(1, q.t * 2); ctx.fillStyle = q.color; ctx.fillText(q.text, q.x - camX, q.y); ctx.globalAlpha = 1; }
+  },
+  drawBeam(ctx, camX, t) {
+    const b = this.beam, x0 = b.x - camX, y = b.y, len = 1000 * b.dir, th = b.thick * (0.8 + 0.2 * Math.sin(t * 50)) * Math.min(1, b.t / 0.15);
+    ctx.fillStyle = b.color; ctx.globalAlpha = 0.45; ctx.fillRect(Math.min(x0, x0 + len), y - th / 2 - 8, Math.abs(len), th + 16);
+    ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.fillRect(Math.min(x0, x0 + len), y - th / 4, Math.abs(len), th / 2);
+    ctx.beginPath(); ctx.arc(x0, y, th * 0.7, 0, 7); ctx.fill();
+  },
+  drawHero(ctx, camX, t) {
+    const h = this.hero, x = h.x - camX, y = h.y, look = Story.forms[this.form];
+    if (h.invuln > 0 && h.knockT > -0.8 && Math.floor(t * 20) % 2) return;
+    if (look.aura) { ctx.fillStyle = look.aura; ctx.globalAlpha = 0.25 + 0.1 * Math.sin(t * 10); ctx.beginPath(); ctx.ellipse(x + 14, y + 20, 26 + this.form * 2, 34 + this.form * 3, 0, 0, 7); ctx.fill(); ctx.globalAlpha = 1; }
+    if (h.flying) { ctx.fillStyle = "rgba(255,255,255,0.5)"; for (let i = 0; i < 3; i++) ctx.fillRect(x + 4 + i * 8, y + 46 + ((t * 80 + i * 7) % 10), 2, 8); }
+    ctx.fillStyle = "#f2c9a0"; ctx.fillRect(x + 6, y + 2, 16, 14);
+    ctx.fillStyle = look.hair;
+    ctx.beginPath(); ctx.moveTo(x + 4, y + 6); ctx.lineTo(x + 8, y - 8); ctx.lineTo(x + 14, y + 2); ctx.lineTo(x + 18, y - 10); ctx.lineTo(x + 22, y + 2); ctx.lineTo(x + 26, y - 4); ctx.lineTo(x + 24, y + 6); ctx.fill();
+    ctx.fillStyle = "#2f6fe0"; ctx.fillRect(x + 4, y + 16, 20, 16);
+    ctx.fillStyle = "#e0e0e0"; ctx.fillRect(x + 4, y + 28, 20, 3);
+    ctx.fillStyle = "#223"; ctx.fillRect(x + 6, y + 32, 7, 12); ctx.fillRect(x + 15, y + 32, 7, 12);
+    ctx.fillStyle = this.form === 4 ? "#cfe0ff" : "#000"; ctx.fillRect(x + (h.facing > 0 ? 17 : 9), y + 7, 3, 3);
+    if (h.punchAnim > 0) { ctx.fillStyle = "#f2c9a0"; ctx.fillRect(h.facing > 0 ? x + 24 : x - 16, y + 18, 20, 7); }
+    if (h.charge > 0) { const r = 4 + h.charge * 14, cx = h.facing > 0 ? x + h.w + 6 : x - 6; ctx.fillStyle = look.aura || "#ffe36a"; ctx.globalAlpha = .5; ctx.beginPath(); ctx.arc(cx, y + 20, r * 1.6, 0, 7); ctx.fill(); ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(cx, y + 20, r, 0, 7); ctx.fill(); }
+  },
+  drawEnemy(ctx, e, x, t) {
+    if (e.type === "grunt") {
+      ctx.fillStyle = "#3aa04a"; ctx.fillRect(x, e.y + 6, e.w, e.h - 6);
+      ctx.fillStyle = "#2a7a36"; ctx.beginPath(); ctx.moveTo(x + 4, e.y + 6); ctx.lineTo(x + 8, e.y - 4); ctx.lineTo(x + 14, e.y + 6); ctx.lineTo(x + 20, e.y - 4); ctx.lineTo(x + 26, e.y + 6); ctx.fill();
+      ctx.fillStyle = "#ff3a3a"; ctx.fillRect(x + (e.vx > 0 ? 18 : 6), e.y + 12, 5, 4);
+    } else {
+      ctx.fillStyle = "#8a8fa8"; ctx.beginPath(); ctx.ellipse(x + 16, e.y + 11, 16, 9, 0, 0, 7); ctx.fill();
+      ctx.fillStyle = "#ff3a3a"; ctx.beginPath(); ctx.arc(x + 16, e.y + 11, 4, 0, 7); ctx.fill();
+      ctx.fillStyle = "#cfd4ea"; ctx.fillRect(x - 4 + Math.sin(t * 30) * 2, e.y, 40, 2);
+    }
+  },
+  drawFighter(ctx, B, x, t) { // original boss designs
+    const y = B.y, fl = B.hitFlash > 0, face = B.facing;
+    const pal = { zarkon: ["#2a6a6a","#8a1a2a","#ffcf3a"], mutagen: ["#9ad8ff","#2a4a8a","#e0faff"], magmora: ["#ff6a1e","#6a1a0a","#ffd04a"], karvon: ["#2a3a6a","#c9a23a","#ffffff"] }[B.id];
+    const [skin, armor, accent] = fl ? ["#fff","#fff","#fff"] : pal;
+    ctx.fillStyle = accent; ctx.globalAlpha = 0.2 + 0.1 * Math.sin(t * 9); ctx.beginPath(); ctx.ellipse(x + 18, y + 28, 36, 46, 0, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+    if (B.id === "magmora") {
+      ctx.fillStyle = skin; ctx.beginPath(); ctx.ellipse(x + 18, y + 32, 22 + Math.sin(t * 5) * 2, 26, 0, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + 18, y + 6, 12, 0, 7); ctx.fill();
+      ctx.fillStyle = armor; for (let i = 0; i < 4; i++) ctx.fillRect(x + 4 + i * 9, y + 50 + ((t * 20 + i * 5) % 8), 4, 6);
+      ctx.fillStyle = accent; ctx.fillRect(x + (face > 0 ? 20 : 8), y + 3, 7, 4);
+      return;
+    }
+    if (B.id === "zarkon") { ctx.fillStyle = armor; ctx.beginPath(); ctx.moveTo(x + 4, y + 16); ctx.lineTo(x - 14 * face + 18, y + 60); ctx.lineTo(x + 32, y + 16); ctx.fill(); } // cape
+    ctx.fillStyle = skin; ctx.fillRect(x + 9, y, 18, 16);
+    ctx.fillStyle = armor; ctx.fillRect(x + 4, y + 16, 28, 22);
+    ctx.fillStyle = skin; ctx.fillRect(x + 7, y + 38, 9, 18); ctx.fillRect(x + 20, y + 38, 9, 18);
+    ctx.fillStyle = accent; ctx.fillRect(x + (face > 0 ? 19 : 11), y + 6, 5, 3);
+    if (B.id === "zarkon") { ctx.fillStyle = accent; ctx.beginPath(); ctx.moveTo(x + 9, y + 2); ctx.lineTo(x + 2, y - 14); ctx.lineTo(x + 14, y); ctx.moveTo(x + 27, y + 2); ctx.lineTo(x + 34, y - 14); ctx.lineTo(x + 22, y); ctx.fill(); }
+    if (B.id === "mutagen") { ctx.fillStyle = accent; for (const [sx, sy, hh] of [[6,16,-14],[30,16,-14],[18,0,-12],[12,2,-8],[24,2,-8]]) { ctx.beginPath(); ctx.moveTo(x + sx - 4, y + sy); ctx.lineTo(x + sx, y + sy + hh); ctx.lineTo(x + sx + 4, y + sy); ctx.fill(); } }
+    if (B.id === "karvon") { ctx.fillStyle = armor; ctx.fillRect(x - 2, y + 14, 12, 8); ctx.fillRect(x + 26, y + 14, 12, 8); ctx.fillStyle = "#101828"; ctx.fillRect(x + 9, y + 5, 18, 4); ctx.fillStyle = accent; ctx.fillRect(x + (face > 0 ? 19 : 11), y + 5, 6, 3); }
+  },
+  drawKaiju(ctx, B, x, t) { // Gorrath: original screen-filling titan
+    const y = B.y, fl = B.hitFlash > 0, body = fl ? "#fff" : "#26402f", dark = fl ? "#fff" : "#172a1e", glow = fl ? "#fff" : "#5ad0ff";
+    ctx.fillStyle = dark; ctx.beginPath(); ctx.moveTo(x + 330, y + 350); ctx.quadraticCurveTo(x + 520, y + 330, x + 560, y + 250); ctx.lineTo(x + 520, y + 400); ctx.fill(); // tail
+    ctx.fillStyle = body;
+    ctx.beginPath(); ctx.moveTo(x + 60, y + 150); ctx.lineTo(x + 140, y + 100); ctx.lineTo(x + 330, y + 130); ctx.lineTo(x + 400, y + 300); ctx.lineTo(x + 360, y + 410); ctx.lineTo(x + 90, y + 410); ctx.lineTo(x + 70, y + 280); ctx.fill(); // torso
+    ctx.fillStyle = dark; ctx.fillRect(x + 110, y + 330, 80, 80); ctx.fillRect(x + 250, y + 330, 90, 80); // legs
+    ctx.fillStyle = body; ctx.beginPath(); ctx.moveTo(x, y + 70); ctx.lineTo(x + 40, y + 20); ctx.lineTo(x + 150, y + 30); ctx.lineTo(x + 170, y + 120); ctx.lineTo(x + 20, y + 120); ctx.fill(); // head
+    ctx.fillStyle = dark; ctx.fillRect(x + 4, y + 100 + Math.max(0, Math.sin(t * 3)) * 10, 120, 22); // jaw
+    ctx.fillStyle = "#e8e0c8"; for (let i = 0; i < 6; i++) { ctx.beginPath(); ctx.moveTo(x + 10 + i * 18, y + 100); ctx.lineTo(x + 16 + i * 18, y + 112); ctx.lineTo(x + 22 + i * 18, y + 100); ctx.fill(); }
+    ctx.fillStyle = "#ffdf3a"; ctx.fillRect(x + 50, y + 50, 22, 10); // eye
+    ctx.fillStyle = dark; ctx.beginPath(); ctx.moveTo(x + 100, y + 180); ctx.lineTo(x + 30, y + 240); ctx.lineTo(x + 50, y + 260); ctx.lineTo(x + 120, y + 220); ctx.fill(); // arm
+    ctx.fillStyle = glow; for (let i = 0; i < 8; i++) { const px = x + 160 + i * 30, py = y + 110 + i * 14; ctx.beginPath(); ctx.moveTo(px - 14, py + 10); ctx.lineTo(px + 4, py - 40 + Math.sin(t * 4 + i) * 6); ctx.lineTo(px + 18, py + 10); ctx.fill(); } // dorsal plates
+    ctx.globalAlpha = 0.3 + 0.2 * Math.sin(t * 6); ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(x + 30, y + 110, 20, 0, 7); ctx.fill(); ctx.globalAlpha = 1; // charging mouth
+  },
+};
+
+// =====================================================================
+// MUSIC MODULE — generated intimidating chiptune (Web Audio, no files)
+// =====================================================================
+const Music = {
+  ctx: null, gain: null, muted: false, track: -1, step: 0, nextTime: 0, noise: null,
+  // semitone offsets from A2; null = rest. kick/snare = 16-step drum patterns.
+  tracks: [
+    { bpm: 132, mel: [0,null,3,null,7,6,null,3, 0,null,-2,null,0,1,null,null], bass: [0,0,0,0,-4,-4,-5,-5], kick: [0,6,8,14], snare: [4,12] },       // Plains: dark march
+    { bpm: 140, mel: [0,0,null,1,null,0,null,6, 5,null,3,null,1,null,0,null], bass: [0,0,1,1,0,0,-2,-2], kick: [0,3,8,11], snare: [4,12] },         // Canyon: phrygian dread
+    { bpm: 96,  mel: [7,null,10,null,8,null,7,null, 3,null,5,null,7,null,null,null], bass: [0,-4,-5,-7,0,-4,-2,-2], kick: [0,8], snare: [12] },        // Truce: uneasy calm
+    { bpm: 146, mel: [0,3,6,3,0,3,6,9, 8,6,3,0,1,null,0,null], bass: [0,0,6,6,5,5,1,1], kick: [0,2,8,10], snare: [4,12] },                           // Ashfall: diminished
+    { bpm: 118, mel: [0,null,null,1,null,null,0,null, -1,null,null,0,null,null,6,null], bass: [0,0,0,0,1,1,-1,-1], kick: [0,4,8,12], snare: [12] },    // Titan: heavy, slow
+    { bpm: 172, mel: [0,1,0,6,0,1,7,6, 0,1,0,6,12,11,7,6], bass: [0,0,1,1,0,0,6,6], kick: [0,2,4,6,8,10,12,14], snare: [4,12] },                       // Void / bosses
+  ],
+  unlock() {
+    if (this.ctx) { if (this.ctx.state === "suspended") this.ctx.resume(); return; }
+    try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
+    this.gain = this.ctx.createGain(); this.gain.gain.value = this.muted ? 0 : CONFIG.musicVolume; this.gain.connect(this.ctx.destination);
+    const len = this.ctx.sampleRate * 0.2, buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1; this.noise = buf;
+  },
+  play(i) { if (this.track !== i) { this.track = i; this.step = 0; if (this.ctx) this.nextTime = this.ctx.currentTime + 0.05; } },
+  stop() { this.track = -1; },
+  toggleMute() { this.muted = !this.muted; if (this.gain) this.gain.gain.value = this.muted ? 0 : CONFIG.musicVolume; },
+  tone(semi, t, dur, type, vol) {
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type; o.frequency.value = 110 * Math.pow(2, semi / 12);
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(this.gain); o.start(t); o.stop(t + dur);
+  },
+  kick(t) { const o = this.ctx.createOscillator(), g = this.ctx.createGain(); o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.15); g.gain.setValueAtTime(1.2, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18); o.connect(g); g.connect(this.gain); o.start(t); o.stop(t + 0.2); },
+  snare(t) { const s = this.ctx.createBufferSource(), g = this.ctx.createGain(); s.buffer = this.noise; g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12); s.connect(g); g.connect(this.gain); s.start(t); },
+  update() {
+    if (!this.ctx || this.track < 0) return;
+    const tr = this.tracks[this.track], stepLen = 60 / tr.bpm / 4;
+    if (this.nextTime < this.ctx.currentTime) this.nextTime = this.ctx.currentTime + 0.05;
+    while (this.nextTime < this.ctx.currentTime + 0.15) {
+      const s = this.step % 16, m = tr.mel[s], T = this.nextTime;
+      if (m !== null && this.step % 2 === 0) { this.tone(m + 12, T, stepLen * 1.8, "sawtooth", 0.22); this.tone(m + 18, T, stepLen * 1.8, "square", 0.08); } // tritone shadow
+      if (this.step % 4 === 0) { const b = tr.bass[(this.step / 4) % tr.bass.length]; this.tone(b, T, stepLen * 3.8, "sawtooth", 0.45); this.tone(b - 12, T, stepLen * 3.8, "triangle", 0.6); }
+      if (tr.kick.includes(s)) this.kick(T);
+      if (tr.snare.includes(s)) this.snare(T);
+      this.step++; this.nextTime += stepLen;
+    }
+  },
+};
+addEventListener("keydown", e => { Music.unlock(); if (e.key.toLowerCase() === "m") Music.toggleMute(); });
+
+// =====================================================================
+// GAME — state machine tying Story, World, Mechanics and Music together
+// =====================================================================
+const canvas = document.getElementById("game"), ctx = canvas.getContext("2d");
+const Game = {
+  state: "title", levelIndex: 0, lines: [], lineIndex: 0, t: 0,
+  init() {
+    World.init(); Mechanics.init(); Mechanics.startLevel(World.levels[0]);
+    Mechanics.onDeath = () => this.loseLife();
+    Mechanics.onLevelGoal = () => this.levelGoal();
+    Mechanics.onBossStart = () => {
+      const info = Story.bosses[Mechanics.boss.id]; Music.play(5);
+      this.showText(info.lines.map(l => l.startsWith("HERO: ") ? { who: "Hero", text: l.slice(6) } : { who: info.name, text: l }), () => { this.state = "play"; });
+    };
+  },
+  showText(lines, next) { this.state = "text"; this.lines = lines; this.lineIndex = 0; this.afterText = next; },
+  beginLevel(i) {
+    this.levelIndex = i; Mechanics.startLevel(World.levels[i]); Music.play(i === 5 ? 5 : i);
+    this.showText([{ who: "", text: Story.levelIntros[i] }], () => { this.state = "play"; });
+  },
+  loseLife() {
+    Mechanics.lives--;
+    if (Mechanics.lives <= 0) { this.state = "gameover"; }
+    else { this.beginLevel(this.levelIndex); Mechanics.popup(`Lives left: ${Mechanics.lives}`, Mechanics.hero.x, 300, "#ff9a9a"); }
+  },
+  levelGoal() {
+    if (this.state !== "play") return;
+    const lvl = World.levels[this.levelIndex];
+    if (lvl.goal === "restaurant") this.showText(Story.restaurantDialogue, () => this.beginLevel(this.levelIndex + 1));
+    else if (this.levelIndex === World.levels.length - 1) this.state = "win";
+    else this.beginLevel(this.levelIndex + 1);
+  },
+  update(dt) {
+    this.t += dt; Music.update();
+    if (this.state === "title" || this.state === "gameover" || this.state === "win") Music.stop();
+    const P = Mechanics.pressed, confirm = P["enter"] || P[" "];
+    if (this.state === "title") { if (confirm) { Mechanics.resetRun(); this.showText(Story.intro.map(text => ({ who: "", text })), () => this.beginLevel(0)); } Mechanics.pressed = {}; return; }
+    if (this.state === "text") { if (confirm) { this.lineIndex++; if (this.lineIndex >= this.lines.length) this.afterText(); } Mechanics.pressed = {}; return; }
+    if (this.state === "gameover" || this.state === "win") { if (P["enter"]) this.state = "title"; Mechanics.pressed = {}; return; }
+    if (this.state === "pause") { if (P["p"]) this.state = "play"; Mechanics.pressed = {}; return; }
+    if (P["p"]) { this.state = "pause"; Mechanics.pressed = {}; return; }
+    Mechanics.update(dt);
+  },
+  draw() {
+    const W = CONFIG.canvasWidth, M = Mechanics;
+    if (this.state === "title") return this.drawTitle();
+    const lvl = M.lvl, h = M.hero;
+    const camX = M.arenaLocked ? lvl.arena : Math.max(0, Math.min(lvl.width - W, h.x - W / 2));
+    ctx.save();
+    const sh = (M.quakeActive ? CONFIG.quakeShake : 0) + (M.shake > 0 ? 8 : 0);
+    if (sh) ctx.translate((Math.random() - .5) * sh * 2, (Math.random() - .5) * sh * 2);
+    World.draw(ctx, lvl, camX, this.t);
+    if (lvl.goal === "restaurant") this.drawRival(ctx, lvl.restaurantX + 60 - camX);
+    M.draw(ctx, camX, this.t);
+    ctx.restore();
+    if (M.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${M.flash * 1.5})`; ctx.fillRect(0, 0, W, 450); }
+    this.drawHUD();
+    if (M.quakeActive) { ctx.fillStyle = "#ffb04a"; ctx.font = "bold 16px system-ui"; ctx.textAlign = "center"; ctx.fillText("EARTHQUAKE! Stay on the ground to absorb it", 400, 130); ctx.textAlign = "left"; }
+    if (this.state === "text") this.drawTextBox(this.lines[this.lineIndex]);
+    if (this.state === "pause") this.drawCenter("Paused", "Press P to resume");
+    if (this.state === "gameover") this.drawCenter("Game over", Story.gameOver + "  Score: " + M.score + "  ·  Enter to restart");
+    if (this.state === "win") this.drawCenter("The universe is saved", Story.win + "  Score: " + M.score + "  ·  Enter to play again");
+  },
+  drawRival(ctx, x) {
+    const y = World.groundY - 46;
+    ctx.fillStyle = "#e6b890"; ctx.fillRect(x + 6, y + 2, 16, 14); ctx.fillStyle = "#c22"; ctx.fillRect(x + 4, y - 6, 20, 9);
+    ctx.fillStyle = "#3a1a4a"; ctx.fillRect(x + 4, y + 16, 20, 18); ctx.fillStyle = "#111"; ctx.fillRect(x + 6, y + 34, 7, 12); ctx.fillRect(x + 15, y + 34, 7, 12);
+    ctx.fillStyle = "#fff"; ctx.font = "12px system-ui"; ctx.fillText(Story.rival.name, x - 2, y - 12);
+  },
+  fmtSpeed(n) { const u = [[1e12,"trillion"],[1e9,"billion"]]; for (const [v, w] of u) if (n >= v) return (n / v).toFixed(1) + " " + w; return String(n); },
+  drawHUD() {
+    const M = Mechanics, h = M.hero, form = Story.forms[M.form];
+    const bar = (x, y, w, val, max, color, label) => { ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.fillRect(x, y, w, 10); ctx.fillStyle = color; ctx.fillRect(x, y, w * Math.max(0, Math.min(1, val / max)), 10); ctx.fillStyle = "#fff"; ctx.font = "11px system-ui"; ctx.fillText(label, x, y - 3); };
+    bar(12, 22, 150, h.health, CONFIG.maxHealth, "#4ae06a", `Health ${Math.ceil(h.health)}`);
+    bar(12, 48, 150, h.ki, CONFIG.maxKi, "#ffe36a", `Ki ${Math.floor(h.ki)}${h.flying ? " · flying (infinite)" : ""}`);
+    const next = CONFIG.forms[M.form + 1], unlocked = M.unlockedForm();
+    const eLabel = next ? `Energy ${Math.floor(M.energy)} / ${next.energy}${unlocked > M.form ? " · press T!" : ""}` : `Energy ${Math.floor(M.energy)} · max form`;
+    bar(12, 74, 150, next ? M.energy : 1, next ? next.energy : 1, form.aura || "#9fd0ff", eLabel);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 14px system-ui";
+    ctx.fillText(`Score ${M.score}`, 630, 22); ctx.fillText(`Lives ${"♥ ".repeat(Math.max(0, M.lives))}`, 630, 42);
+    ctx.fillStyle = form.aura || "#ccc"; ctx.fillText(form.name, 630, 62);
+    ctx.fillStyle = "#cfc6ff"; ctx.font = "11px system-ui"; ctx.fillText(`Speed ${this.fmtSpeed(M.F.lightSpeed)} × light`, 630, 78);
+    ctx.fillText(`Instinct dodge ${Math.round(M.F.dodge * 100)}%`, 630, 92);
+    const B = M.boss;
+    if (B && B.alive) { ctx.fillStyle = "#300"; ctx.fillRect(200, 108, 400, 10); ctx.fillStyle = "#ff4a2a"; ctx.fillRect(200, 108, 400 * Math.max(0, B.hp) / B.S.hp, 10); ctx.fillStyle = "#fff"; ctx.font = "bold 13px system-ui"; ctx.fillText(Story.bosses[B.id].name, 200, 102); }
+  },
+  wrap(text, x, y, maxW, lh) {
+    for (const para of text.split("\n")) { let line = ""; for (const w of para.split(" ")) { const test = line + w + " "; if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, x, y); y += lh; line = w + " "; } else line = test; } ctx.fillText(line, x, y); y += lh; }
+  },
+  drawTextBox(line) {
+    ctx.fillStyle = "rgba(10,8,30,.92)"; ctx.fillRect(40, 300, 720, 120); ctx.strokeStyle = "#6b4fb0"; ctx.lineWidth = 2; ctx.strokeRect(40, 300, 720, 120);
+    let y = 330;
+    if (line.who) { ctx.fillStyle = line.who === "Hero" ? "#6aa8ff" : "#ff7a7a"; ctx.font = "bold 15px system-ui"; ctx.fillText(line.who, 60, y); y += 24; }
+    ctx.fillStyle = "#fff"; ctx.font = "16px system-ui"; this.wrap(line.text, 60, y, 680, 22);
+    ctx.fillStyle = "#aaa"; ctx.font = "12px system-ui"; ctx.fillText("Enter / click ▸", 660, 410);
+  },
+  drawCenter(title, sub) {
+    ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillRect(0, 0, 800, 450);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 34px system-ui"; ctx.textAlign = "center"; ctx.fillText(title, 400, 180);
+    ctx.font = "15px system-ui"; let y = 220, line = "";
+    for (const w of sub.split(" ")) { const t = line + w + " "; if (ctx.measureText(t).width > 600 && line) { ctx.fillText(line, 400, y); y += 22; line = w + " "; } else line = t; }
+    ctx.fillText(line, 400, y); ctx.textAlign = "left";
+  },
+  drawTitle() {
+    const t = this.t, sky = ctx.createLinearGradient(0, 0, 0, 450); sky.addColorStop(0, "#0a0620"); sky.addColorStop(1, "#3a1a5a");
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, 800, 450);
+    if (Math.sin(t * 2.3) > 0.9) { ctx.strokeStyle = "#fffbd0"; ctx.lineWidth = 3; ctx.beginPath(); let x = 150 + Math.random() * 500; ctx.moveTo(x, 0); for (let y = 0; y < 300; y += 30) { x += (Math.random() - .5) * 50; ctx.lineTo(x, y); } ctx.stroke(); }
+    ctx.textAlign = "center"; ctx.fillStyle = "#ffe36a"; ctx.font = "900 64px system-ui"; ctx.fillText("Dragon Storm", 400, 190);
+    ctx.fillStyle = "#cfc6ff"; ctx.font = "18px system-ui"; ctx.fillText("Absorb the storm. Save the universe.", 400, 230);
+    ctx.fillStyle = "#fff"; ctx.globalAlpha = .6 + .4 * Math.sin(t * 4); ctx.fillText("Click here or press Enter to start", 400, 320); ctx.globalAlpha = 1; ctx.textAlign = "left";
+  },
+};
+
+Game.init();
+const press = k => { Music.unlock(); if (!Mechanics.keys[k]) Mechanics.pressed[k] = true; Mechanics.keys[k] = true; };
+const release = k => { Mechanics.keys[k] = false; };
+canvas.addEventListener("pointerdown", () => { canvas.focus(); window.focus(); press("enter"); setTimeout(() => release("enter"), 50); });
+document.querySelectorAll("#touch button").forEach(b => {
+  const k = b.dataset.k;
+  b.addEventListener("pointerdown", e => { e.preventDefault(); press(k); });
+  ["pointerup","pointerleave","pointercancel"].forEach(ev => b.addEventListener(ev, () => release(k)));
+});
+canvas.focus();
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  try { Game.update(dt); Game.draw(); } catch (err) { console.error(err); }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
